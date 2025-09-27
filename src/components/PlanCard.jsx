@@ -2,13 +2,27 @@ import React from "react";
 import { Chip, Stars, Stat } from "./UIComponents";
 import { bayesScore, planStats } from "../utils/helpers";
 
-export default function PlanCard({ plan, ratings, exps, onRate, onSelect }) {
+export default function PlanCard({
+  plan,
+  ratings,
+  exps,
+  onRate,
+  onSelect,
+  showHistory = false, // 新增的属性
+}) {
   const rts = ratings.filter((r) => r.planId === plan.id);
   const avg = rts.length
     ? rts.reduce((s, r) => s + r.rating, 0) / rts.length
     : 0;
   const score = bayesScore(rts);
   const st = planStats(plan.id, exps);
+
+  // 新增的评分分布计算逻辑
+  const total = rts.length || 0;
+  const dist = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  rts.forEach((r) => {
+    dist[r.rating] = (dist[r.rating] || 0) + 1;
+  });
 
   return (
     <div className="rounded-2xl p-4 shadow-sm border bg-white flex flex-col gap-3">
@@ -67,6 +81,31 @@ export default function PlanCard({ plan, ratings, exps, onRate, onSelect }) {
           value={`${st.n ? st.avgOnboard.toFixed(1) : "-"} min`}
         />
       </div>
+
+      {/* 历史评分分布：只在选了起终点时展示 */}
+      {showHistory && (
+        <div className="rounded-xl p-3 border bg-slate-50">
+          <div className="text-sm font-medium mb-1">历史用户评分</div>
+          <div className="space-y-1">
+            {[5, 4, 3, 2, 1].map((s) => {
+              const cnt = dist[s] || 0;
+              const pct = total ? (cnt / total) * 100 : 0;
+              return (
+                <div key={s} className="flex items-center gap-2 text-xs">
+                  <span className="w-8">{s}★</span>
+                  <div className="flex-1 h-2 bg-white rounded-full overflow-hidden border">
+                    <div
+                      className="h-full bg-slate-900"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="w-10 text-right">{cnt}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center gap-3">
         <button

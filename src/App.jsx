@@ -7,7 +7,7 @@ import PlanCard from "./components/PlanCard";
 import ExperienceForm from "./components/ExperienceForm";
 import InsightCard from "./components/InsightCard";
 import MapView from "./components/MapView";
-import { DaysPicker } from "./components/UIComponents";
+import { DaysPicker, Chip } from "./components/UIComponents";
 
 export default function App() {
   const { plans, ratings, exps, addPlan, addRating, addExp } = useData();
@@ -55,6 +55,17 @@ export default function App() {
     });
     return scored.sort((a, b) => b.composite - a.composite);
   }, [plans, ratings, exps, qOrigin, qDest, qTime, model]);
+
+  const hasSelection = useMemo(
+    () =>
+      knownNames.includes((qOrigin || "").trim()) &&
+      knownNames.includes((qDest || "").trim()),
+    [qOrigin, qDest]
+  );
+  const topThree = useMemo(
+    () => (hasSelection ? filtered.slice(0, 3) : []),
+    [filtered, hasSelection]
+  );
 
   const myPlans = useMemo(
     () => plans.filter((p) => p.author === "you@ufl.edu"),
@@ -219,7 +230,12 @@ export default function App() {
                   onChange={(e) => setQTime(e.target.value)}
                 />
                 <div className="flex items-center gap-2 text-sm text-slate-500">
-                  <span>{filtered.length} match(es)</span>
+                  <span>
+                    {hasSelection
+                      ? Math.min(3, filtered.length)
+                      : filtered.length}{" "}
+                    match(es)
+                  </span>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -246,7 +262,7 @@ export default function App() {
 
             <div className="grid gap-4 lg:grid-cols-2">
               <div className="order-2 lg:order-1 grid gap-4">
-                {filtered.map(({ p }) => (
+                {(hasSelection ? topThree : filtered).map(({ p }) => (
                   <PlanCard
                     key={p.id}
                     plan={p}
@@ -254,6 +270,7 @@ export default function App() {
                     exps={exps}
                     onRate={(n) => onRate(p.id, n)}
                     onSelect={(plan) => setSelectedPlan(plan)}
+                    showHistory={hasSelection} // 传入新增的属性
                   />
                 ))}
 
