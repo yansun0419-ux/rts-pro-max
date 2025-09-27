@@ -1,0 +1,372 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>UF Transit Optimizer (MVP)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Tailwind CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM UMD -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel for in-browser JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body class="bg-slate-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useState, useEffect, useMemo } = React;
+
+      // --------- Utilities ---------
+      const uid = () => Math.random().toString(36).slice(2, 10);
+
+      const load = (key, fallback) => {
+        try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback } catch { return fallback }
+      };
+      const save = (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} };
+
+      // Seed data
+      const seedPlans = [
+        {
+          id: uid(),
+          title: "Reitz → Butler Plaza (morning)",
+          origin: "Reitz Union",
+          destination: "Butler Plaza",
+          days: ["Mon","Tue","Wed","Thu","Fri"],
+          departWindow: "08:00-09:30",
+          legs: [
+            { route: "34", from: "Reitz Union", to: "Butler Plaza Transfer", notes: "Usually every ~10-12 min in peak" },
+          ],
+          author: "demo@ufl.edu",
+          createdAt: Date.now() - 1000*60*60*24*3
+        },
+        {
+          id: uid(),
+          title: "Broward → New Engineering Bldg (class rush)",
+          origin: "Broward Hall",
+          destination: "New Engineering Building",
+          days: ["Mon","Wed","Fri"],
+          departWindow: "10:10-10:40",
+          legs: [
+            { route: "9", from: "Broward Area", to: "Hub", notes: "Short hop; walk 5-7 min" },
+          ],
+          author: "alex@ufl.edu",
+          createdAt: Date.now() - 1000*60*60*24*2
+        },
+        {
+          id: uid(),
+          title: "Shands → Newell (afternoon labs)",
+          origin: "UF Health Shands",
+          destination: "Newell Hall",
+          days: ["Tue","Thu"],
+          departWindow: "15:00-16:30",
+          legs: [
+            { route: "20", from: "Shands", to: "Tigert / Newell", notes: "Often crowded; try front car" },
+          ],
+          author: "maya@ufl.edu",
+          createdAt: Date.now() - 1000*60*60*36
+        },
+      ];
+
+      const seedRatings = [
+        { id: uid(), planId: seedPlans[0].id, rating: 5, comment: "Consistent timing.", user: "u1", createdAt: Date.now()-1000*60*60*10 },
+        { id: uid(), planId: seedPlans[0].id, rating: 4, comment: "Crowded on Fri.", user: "u2", createdAt: Date.now()-1000*60*60*9 },
+        { id: uid(), planId: seedPlans[1].id, rating: 3, comment: "OK but tight transfer.", user: "u3", createdAt: Date.now()-1000*60*60*5 },
+        { id: uid(), planId: seedPlans[2].id, rating: 5, comment: "Great for labs.", user: "u4", createdAt: Date.now()-1000*60*60*8 },
+      ];
+
+      function ensureSeed() {
+        const has = load("ufx_plans", null);
+        if (!has || !Array.isArray(has) || has.length === 0) save("ufx_plans", seedPlans);
+        const rs = load("ufx_ratings", null);
+        if (!rs || !Array.isArray(rs) || rs.length === 0) save("ufx_ratings", seedRatings);
+      }
+
+      // Simple string similarity (bag-of-words overlap)
+      function textSim(a, b) {
+        const A = new Set((a||"").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+        const B = new Set((b||"").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+        if (!A.size || !B.size) return 0;
+        let inter = 0; A.forEach(x => { if (B.has(x)) inter++; });
+        return inter / Math.max(A.size, B.size);
+      }
+
+      // Bayesian smoothed score
+      function bayesScore(ratings) {
+        const n = ratings.length; if (!n) return 0;
+        const sum = ratings.reduce((s,r)=>s+r.rating,0);
+        const prior = 3.8; const weight = 2;
+        return (sum + prior*weight) / (n + weight);
+      }
+
+      function usePlans() {
+        const [plans, setPlans] = useState(load("ufx_plans", []));
+        const [ratings, setRatings] = useState(load("ufx_ratings", []));
+
+        useEffect(()=>{ ensureSeed(); setPlans(load("ufx_plans", [])); setRatings(load("ufx_ratings", [])); }, []);
+        useEffect(()=>{ save("ufx_plans", plans); }, [plans]);
+        useEffect(()=>{ save("ufx_ratings", ratings); }, [ratings]);
+
+        const addPlan = (p) => setPlans(prev => [{...p, id: uid(), createdAt: Date.now()}, ...prev]);
+        const addRating = (r) => setRatings(prev => [{...r, id: uid(), createdAt: Date.now()}, ...prev]);
+
+        return { plans, ratings, addPlan, addRating };
+      }
+
+      // --------- UI Components ---------
+      const Chip = ({children}) => (
+        <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-xs border border-slate-200">{children}</span>
+      );
+
+      function Stars({ value=0, onChange }) {
+        const [hover, setHover] = useState(0);
+        const stars = [1,2,3,4,5];
+        return (
+          <div className="flex items-center gap-1">
+            {stars.map(n => (
+              <button
+                key={n}
+                type="button"
+                onMouseEnter={()=>setHover(n)}
+                onMouseLeave={()=>setHover(0)}
+                onClick={()=>onChange && onChange(n)}
+                className="text-xl"
+                aria-label={`rate ${n}`}
+              >{(hover||value) >= n ? "★" : "☆"}</button>
+            ))}
+          </div>
+        );
+      }
+
+      function PlanCard({ plan, ratings, onRate }) {
+        const rts = ratings.filter(r=>r.planId===plan.id);
+        const avg = rts.length ? (rts.reduce((s,r)=>s+r.rating,0)/rts.length) : 0;
+        const score = bayesScore(rts);
+
+        return (
+          <div className="rounded-2xl p-4 shadow-sm border bg-white flex flex-col gap-3">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-semibold">{plan.title}</h3>
+                <p className="text-sm text-slate-600">{plan.origin} → {plan.destination}</p>
+              </div>
+              <div className="text-right">
+                <div className="text-sm">⭐ {avg.toFixed(2)} <span className="text-slate-400">({rts.length})</span></div>
+                <div className="text-[11px] text-slate-400">Confidence: {score.toFixed(2)}</div>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Chip>{plan.departWindow}</Chip>
+              <Chip>{plan.days.join(" • ")}</Chip>
+              <Chip>by {plan.author}</Chip>
+            </div>
+            <ol className="list-decimal pl-6 text-sm text-slate-700">
+              {plan.legs.map((l, i)=> (
+                <li key={i} className="mb-1"><span className="font-medium">{l.route ? `Route ${l.route}` : "Leg"}</span>: {l.from} → {l.to} {l.notes ? <span className="text-slate-500">· {l.notes}</span> : null}</li>
+              ))}
+            </ol>
+            <div className="flex items-center gap-3">
+              <Stars onChange={(n)=> onRate && onRate(n)} />
+              <span className="text-xs text-slate-500">Rate this plan</span>
+            </div>
+          </div>
+        );
+      }
+
+      function DaysPicker({ value, onChange }) {
+        const days = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+        const toggle = (d) => {
+          const has = value.includes(d);
+          const next = has ? value.filter(x=>x!==d) : [...value, d];
+          onChange(next);
+        };
+        return (
+          <div className="flex flex-wrap gap-1.5 items-center">
+            {days.map(d => (
+              <button key={d} type="button" onClick={()=>toggle(d)} className={`px-2.5 py-1 rounded-xl border text-sm ${value.includes(d)?"bg-slate-900 text-white border-slate-900":"bg-white hover:bg-slate-50"}`}>{d}</button>
+            ))}
+          </div>
+        );
+      }
+
+      // --------- App ---------
+      function App() {
+        const { plans, ratings, addPlan, addRating } = usePlans();
+        const [tab, setTab] = useState("explore");
+
+        // Search / Recommend controls
+        const [qOrigin, setQOrigin] = useState("");
+        const [qDest, setQDest] = useState("");
+        const [qTime, setQTime] = useState(""); // optional HH:MM-HH:MM
+
+        // New plan form state
+        const [form, setForm] = useState({
+          title: "",
+          origin: "",
+          destination: "",
+          days: [],
+          departWindow: "08:00-09:00",
+          legs: [{ route: "", from: "", to: "", notes: "" }],
+          author: "you@ufl.edu"
+        });
+
+        const filtered = useMemo(()=>{
+          const scored = plans.map(p => {
+            const s1 = textSim(qOrigin, p.origin);
+            const s2 = textSim(qDest, p.destination);
+            const tBoost = qTime && p.departWindow.includes(qTime.split("-")[0].slice(0,2)) ? 0.1 : 0;
+            const rs = ratings.filter(r=>r.planId===p.id);
+            const conf = bayesScore(rs);
+            const composite = (s1 + s2)/2 + conf/10 + tBoost;
+            return {p, rs, conf, composite};
+          });
+          return scored.sort((a,b)=> b.composite - a.composite);
+        }, [plans, ratings, qOrigin, qDest, qTime]);
+
+        const myPlans = useMemo(()=> plans.filter(p => p.author === "you@ufl.edu"), [plans]);
+
+        const handleAddLeg = () => setForm(f => ({...f, legs: [...f.legs, { route: "", from: "", to: "", notes: "" }]}));
+        const handleRemoveLeg = (idx) => setForm(f => ({...f, legs: f.legs.filter((_,i)=>i!==idx)}));
+
+        const submitPlan = (e) => {
+          e.preventDefault();
+          const cleanLegs = form.legs.filter(l => l.from && l.to);
+          if (!form.title || !form.origin || !form.destination || cleanLegs.length===0) return alert("Please fill title, origin, destination, and at least one leg.");
+          const plan = { id: "", title: form.title.trim(), origin: form.origin.trim(), destination: form.destination.trim(), days: form.days, departWindow: form.departWindow, legs: cleanLegs, author: form.author.trim(), createdAt: Date.now() };
+          addPlan(plan);
+          setForm({ title: "", origin: "", destination: "", days: [], departWindow: "08:00-09:00", legs: [{ route: "", from: "", to: "", notes: "" }], author: form.author });
+          setTab("explore");
+        };
+
+        const onRate = (planId, n) => {
+          const comment = "";
+          addRating({ id: "", planId, rating: n, comment, user: "anon", createdAt: Date.now() });
+        };
+
+        return (
+          <div className="min-h-screen bg-slate-50">
+            <header className="sticky top-0 z-10 bg-white/90 backdrop-blur border-b">
+              <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-2xl bg-slate-900 text-white grid place-items-center text-sm">UF</div>
+                  <div>
+                    <h1 className="font-bold leading-tight">UF Transit Optimizer</h1>
+                    <p className="text-xs text-slate-500 -mt-0.5">Crowd-sourced bus plan ratings + simple recommendations</p>
+                  </div>
+                </div>
+                <nav className="flex items-center gap-2 text-sm">
+                  {[{k:"explore",t:"Explore"},{k:"new",t:"Add Plan"},{k:"mine",t:"My Plans"}].map(x=> (
+                    <button key={x.k} onClick={()=>setTab(x.k)} className={`px-3 py-1.5 rounded-xl border ${tab===x.k?"bg-slate-900 text-white border-slate-900":"bg-white hover:bg-slate-100"}`}>{x.t}</button>
+                  ))}
+                </nav>
+              </div>
+            </header>
+
+            <main className="max-w-5xl mx-auto px-4 py-6">
+              {tab === "explore" && (
+                <section className="space-y-4">
+                  <div className="rounded-2xl p-4 border bg-white">
+                    <div className="grid md:grid-cols-4 gap-3">
+                      <input className="px-3 py-2 rounded-xl border" placeholder="Origin (e.g., Reitz)" value={qOrigin} onChange={e=>setQOrigin(e.target.value)} />
+                      <input className="px-3 py-2 rounded-xl border" placeholder="Destination (e.g., Shands)" value={qDest} onChange={e=>setQDest(e.target.value)} />
+                      <input className="px-3 py-2 rounded-xl border" placeholder="Time window (optional: 08:00-09:00)" value={qTime} onChange={e=>setQTime(e.target.value)} />
+                      <div className="flex items-center gap-2">
+                        <div className="text-sm text-slate-500">{filtered.length} match(es)</div>
+                      </div>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-2">Tip: This MVP matches by text similarity + rating confidence. Integrate GTFS later for exact stop matching & live ETAs.</p>
+                  </div>
+
+                  <div className="grid gap-4">
+                    {filtered.map(({p}) => (
+                      <PlanCard key={p.id} plan={p} ratings={ratings} onRate={(n)=>onRate(p.id, n)} />
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {tab === "new" && (
+                <section>
+                  <form onSubmit={submitPlan} className="rounded-2xl p-4 border bg-white space-y-4">
+                    <div className="grid md:grid-cols-2 gap-3">
+                      <input className="px-3 py-2 rounded-xl border" placeholder="Title (e.g., Reitz → Butler fast AM)" value={form.title} onChange={e=>setForm(f=>({...f, title: e.target.value}))} />
+                      <input className="px-3 py-2 rounded-xl border" placeholder="Author (email or nickname)" value={form.author} onChange={e=>setForm(f=>({...f, author: e.target.value}))} />
+                      <input className="px-3 py-2 rounded-xl border" placeholder="Origin" value={form.origin} onChange={e=>setForm(f=>({...f, origin: e.target.value}))} />
+                      <input className="px-3 py-2 rounded-xl border" placeholder="Destination" value={form.destination} onChange={e=>setForm(f=>({...f, destination: e.target.value}))} />
+                      <input className="px-3 py-2 rounded-xl border" placeholder="Depart window (HH:MM-HH:MM)" value={form.departWindow} onChange={e=>setForm(f=>({...f, departWindow: e.target.value}))} />
+                      <DaysPicker value={form.days} onChange={(days)=>setForm(f=>({...f, days}))} />
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="font-medium">Legs</div>
+                      {form.legs.map((leg,idx)=> (
+                        <div key={idx} className="grid md:grid-cols-4 gap-2">
+                          <input className="px-3 py-2 rounded-xl border" placeholder="Route (optional)" value={leg.route} onChange={e=>setForm(f=>({...f, legs: f.legs.map((L,i)=> i===idx?{...L, route: e.target.value}:L)}))} />
+                          <input className="px-3 py-2 rounded-xl border" placeholder="From stop/landmark" value={leg.from} onChange={e=>setForm(f=>({...f, legs: f.legs.map((L,i)=> i===idx?{...L, from: e.target.value}:L)}))} />
+                          <input className="px-3 py-2 rounded-xl border" placeholder="To stop/landmark" value={leg.to} onChange={e=>setForm(f=>({...f, legs: f.legs.map((L,i)=> i===idx?{...L, to: e.target.value}:L)}))} />
+                          <input className="px-3 py-2 rounded-xl border" placeholder="Notes (crowding, tips, etc.)" value={leg.notes} onChange={e=>setForm(f=>({...f, legs: f.legs.map((L,i)=> i===idx?{...L, notes: e.target.value}:L)}))} />
+                        </div>
+                      ))}
+                      <div className="flex gap-2">
+                        <button type="button" onClick={handleAddLeg} className="px-3 py-2 rounded-xl border bg-white hover:bg-slate-50">+ Add leg</button>
+                        {form.legs.length>1 && (
+                          <button type="button" onClick={()=>handleRemoveLeg(form.legs.length-1)} className="px-3 py-2 rounded-xl border bg-white hover:bg-slate-50">− Remove last</button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button type="submit" className="px-4 py-2 rounded-xl bg-slate-900 text-white">Publish Plan</button>
+                    </div>
+
+                    <p className="text-xs text-slate-500">Note: This demo stores your data in your browser only. In production we would anonymize and store aggregate travel patterns on a secure backend.</p>
+                  </form>
+                </section>
+              )}
+
+              {tab === "mine" && (
+                <section className="space-y-4">
+                  <div className="rounded-2xl p-4 border bg-white">
+                    <div className="text-sm text-slate-600 mb-2">Showing plans authored by <span className="font-medium">you@ufl.edu</span> (change in the Add Plan form).</div>
+                    <div className="grid gap-4">
+                      {myPlans.length===0 && <div className="text-slate-500">No plans yet. Create one in <button className="underline" onClick={()=>setTab("new")}>Add Plan</button>.</div>}
+                      {myPlans.map(p => (
+                        <PlanCard key={p.id} plan={p} ratings={ratings} onRate={(n)=>onRate(p.id, n)} />
+                      ))}
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              <section className="mt-6 text-sm text-slate-600">
+                <div className="rounded-2xl p-4 border bg-white">
+                  <div className="font-semibold mb-1">What this MVP demonstrates</div>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li>User-generated route proposals with multi-leg structure</li>
+                    <li>Community ratings with Bayesian smoothing (prevents spammy single 5★ dominating)</li>
+                    <li>Text-based matching of origin/destination/time for quick recommendations</li>
+                    <li>Local-first prototype (no backend), ready to swap in a real API later</li>
+                  </ul>
+                  <div className="font-semibold mt-4 mb-1">What to add next</div>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li>Import UF RTS GTFS (routes/stops) to validate legs and auto-suggest stops.</li>
+                    <li>Use GTFS-Realtime for live arrivals and crowding (if provided).</li>
+                    <li>Trust model: weigh ratings by rater reputation & recency; detect outliers.</li>
+                    <li>Privacy: anonymize and aggregate usage; opt-in geolocation.</li>
+                  </ul>
+                </div>
+              </section>
+            </main>
+
+            <footer className="py-10 text-center text-xs text-slate-400">MVP • UF Transit Optimizer • Built for discussion & iteration</footer>
+          </div>
+        );
+      }
+
+      // Mount
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
